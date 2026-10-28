@@ -1,7 +1,7 @@
 from logger import start_logger
 from updater import Updater
 
-
+#test
 MANIFEST = ""
 __version__ = "1.0.0"
 
