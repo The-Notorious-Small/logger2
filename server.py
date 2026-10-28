@@ -2,10 +2,8 @@ from flask import Flask, request, send_from_directory
 import os
 
 app = Flask(__name__)
-UPLOAD_FOLDER = "."
-# Point this to the folder where PyUpdater stores built updates (e.g., pyu-data/releases/)
-UPDATES_FOLDER = os.path.abspath("pyu-data/releases")
-
+UPLOAD_FOLDER = "/upload"
+RELEASES= "releases"
 @app.route("/upload", methods=["POST"])
 def upload_file():
     if "file" not in request.files:
@@ -17,10 +15,13 @@ def upload_file():
         file.save(os.path.join(UPLOAD_FOLDER, "received_" + file.filename))
         return "File uploaded successfully", 200
 
-# Endpoint to serve update files to the client application
-@app.route("/updates/<path:filename>", methods=["GET"])
-def download_update(filename):
-    return send_from_directory(UPDATES_FOLDER, filename)
+@app.route("/latest.json")
+def manifest():
+    return send_from_directory(RELEASES, "latest.json")
+
+@app.route("/download/<path:filename>")
+def download(filename):
+    return send_from_directory(RELEASES, filename, as_attachment=True)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
