@@ -2,7 +2,7 @@ from logger import start_logger
 from updater import Updater
 
 #test
-MANIFEST = "http://127.0.0.1:5000/latest.json"
+MANIFEST = "http://192.168.122.1:5000/latest.json"
 __version__ = "1.0.0"
 
 

