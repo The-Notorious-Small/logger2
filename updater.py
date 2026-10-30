@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -13,6 +14,8 @@ import tempfile
 import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Optional
+
+log = logging.getLogger("updater")
 
 
 class UpdateError(Exception):
@@ -44,7 +47,7 @@ class Updater:
         self,
         current_version: str,
         manifest_url: str,
-        timeout: float = 10,
+        timeout: float = 60.0,  # Increased timeout for large binaries
         exe_path: Optional[str] = None,
         user_agent: str = "pyi-updater",
     ):
@@ -62,9 +65,6 @@ class Updater:
         try:
             with self._open(self.manifest_url) as r:
                 data = json.load(r)
-            for key in ("version", "url", "sha256"):
-                if key not in data:
-                    raise UpdateError(f"Manifest missing required field: {key}")
             info = UpdateInfo(
                 version=data["version"],
                 url=data["url"],
@@ -84,20 +84,36 @@ class Updater:
         progress: Optional[Callable[[int, Optional[int]], None]] = None,
     ) -> str:
         exe_dir = os.path.dirname(self.exe_path)
-        fd, tmp = tempfile.mkstemp(dir=exe_dir, suffix=".download")
+        
+        # Ensure target dir is writable; fallback to temp dir if Program Files / read-only
+        target_dir = exe_dir
+        try:
+            test_fd, test_path = tempfile.mkstemp(dir=exe_dir)
+            os.close(test_fd)
+            os.remove(test_path)
+        except (PermissionError, OSError):
+            target_dir = tempfile.gettempdir()
+
+        fd, tmp = tempfile.mkstemp(dir=target_dir, suffix=".download")
         os.close(fd)
+        
         h = hashlib.sha256()
         try:
-            with self._open(info.url) as r, open(tmp, "wb") as f:
+            with self._open(info.url) as r:
+                if getattr(r, "status", 200) != 200:
+                    raise UpdateError(f"Server returned HTTP status {r.status}")
+
                 total = r.headers.get("Content-Length")
                 total = int(total) if total else None
                 done = 0
-                while chunk := r.read(1 << 16):
-                    f.write(chunk)
-                    h.update(chunk)
-                    done += len(chunk)
-                    if progress:
-                        progress(done, total)
+                
+                with open(tmp, "wb") as f:
+                    while chunk := r.read(1 << 16):
+                        f.write(chunk)
+                        h.update(chunk)
+                        done += len(chunk)
+                        if progress:
+                            progress(done, total)
         except Exception as e:
             _silent_remove(tmp)
             raise UpdateError(f"Download failed: {e}") from e
@@ -105,19 +121,19 @@ class Updater:
         if h.hexdigest().lower() != info.sha256.lower():
             _silent_remove(tmp)
             raise UpdateError("Checksum mismatch - refusing to install update")
+            
         return tmp
 
     def install_and_restart(self, downloaded_path: str) -> None:
         """
-        Spawns a batch script on Windows to handle replacing the locked executable
-        after this process exits.
+        Handles replacing the executable safely across platforms.
+        Uses a detached background batch script on Windows to bypass file-locking.
         """
         if os.name == "nt":
             pid = os.getpid()
             fd, bat_path = tempfile.mkstemp(prefix="update_app_", suffix=".bat", dir=tempfile.gettempdir())
             os.close(fd)
             
-            # Create a batch script that waits for the process to die, replaces the exe, and restarts it
             bat_content = f"""@echo off
 echo Waiting for process {pid} to exit...
 :waitloop
@@ -145,11 +161,10 @@ del "%~f0"
             with open(bat_path, "w") as bfile:
                 bfile.write(bat_content)
 
-            # Launch the batch script detached
             subprocess.Popen([bat_path], shell=True, creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW)
+            logging.shutdown()
             sys.exit(0)
         else:
-            # Fallback/Unix logic
             old = self.exe_path + ".old"
             try:
                 _silent_remove(old)
@@ -157,16 +172,14 @@ del "%~f0"
                 try:
                     os.rename(downloaded_path, self.exe_path)
                 except OSError:
-                    try:
-                        os.rename(old, self.exe_path)
-                    except OSError:
-                        pass
+                    os.rename(old, self.exe_path)
                     raise
                 os.chmod(self.exe_path, 0o755)
             except OSError as e:
                 _silent_remove(downloaded_path)
                 raise UpdateError(f"Could not replace executable: {e}") from e
-            
+
+            logging.shutdown()
             env = os.environ.copy()
             env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
             subprocess.Popen([self.exe_path, *sys.argv[1:]], env=env, close_fds=True)
@@ -193,7 +206,7 @@ del "%~f0"
         except UpdateError as e:
             if raise_errors:
                 raise
-            print(f"[updater] {e}", file=sys.stderr)
+            log.error("[updater] %s", e)
             return False
         return True
 
