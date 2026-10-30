@@ -62,6 +62,9 @@ class Updater:
         try:
             with self._open(self.manifest_url) as r:
                 data = json.load(r)
+            for key in ("version", "url", "sha256"):
+                if key not in data:
+                    raise UpdateError(f"Manifest missing required field: {key}")
             info = UpdateInfo(
                 version=data["version"],
                 url=data["url"],
@@ -110,8 +113,9 @@ class Updater:
         after this process exits.
         """
         if os.name == "nt":
-            bat_path = os.path.join(tempfile.gettempdir(), "update_app.bat")
             pid = os.getpid()
+            fd, bat_path = tempfile.mkstemp(prefix="update_app_", suffix=".bat", dir=tempfile.gettempdir())
+            os.close(fd)
             
             # Create a batch script that waits for the process to die, replaces the exe, and restarts it
             bat_content = f"""@echo off
@@ -126,8 +130,12 @@ if not errorlevel 1 (
 echo Replacing executable...
 move /y "{downloaded_path}" "{self.exe_path}"
 if errorlevel 1 (
-    echo Update failed! Restoring or exiting...
-    exit /b 1
+    copy /y "{downloaded_path}" "{self.exe_path}"
+    if errorlevel 1 (
+        del "%~f0"
+        exit /b 1
+    )
+    del "{downloaded_path}"
 )
 
 echo Launching updated application...
@@ -146,13 +154,21 @@ del "%~f0"
             try:
                 _silent_remove(old)
                 os.rename(self.exe_path, old)
-                os.rename(downloaded_path, self.exe_path)
+                try:
+                    os.rename(downloaded_path, self.exe_path)
+                except OSError:
+                    try:
+                        os.rename(old, self.exe_path)
+                    except OSError:
+                        pass
+                    raise
                 os.chmod(self.exe_path, 0o755)
             except OSError as e:
                 _silent_remove(downloaded_path)
                 raise UpdateError(f"Could not replace executable: {e}") from e
             
             env = os.environ.copy()
+            env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
             subprocess.Popen([self.exe_path, *sys.argv[1:]], env=env, close_fds=True)
             sys.exit(0)
 

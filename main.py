@@ -8,11 +8,11 @@ __version__ = "1.1.0"
 
 
 if __name__ == "__main__":
-       try:
+    try:
         Updater(__version__, MANIFEST).run()
         start_logger()
-       except Exception as e:
+    except Exception as e:
         print(f"CRITICAL ERROR: {e}")
-    
-    # Keeps the console window open so you can read errors      
-       input("\nPress Enter to exit...")
+
+    # Keeps the console window open so you can read errors
+    input("\nPress Enter to exit...")
