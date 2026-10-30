@@ -1,15 +1,5 @@
 """
 updater.py - self-updater for PyInstaller --onefile executables (stdlib only).
-
-Put this file next to your main.py, then:
-
-    from updater import Updater
-    Updater("1.1.0", "https://example.com/myapp/latest.json").run()
-
-Release helper (run from source, not the exe) to make the manifest:
-
-    python updater.py dist/myapp.exe --version 1.2.0 \
-        --url https://example.com/myapp/myapp-1.2.0.exe -o latest.json
 """
 
 from __future__ import annotations
@@ -38,7 +28,6 @@ class UpdateInfo:
 
 
 def parse_version(v: str) -> tuple:
-    """'v1.10.2' -> (1, 10, 2). Non-numeric parts are ignored."""
     parts = []
     for p in v.strip().lstrip("vV").split("."):
         digits = "".join(ch for ch in p if ch.isdigit())
@@ -51,17 +40,6 @@ def is_frozen() -> bool:
 
 
 class Updater:
-    """
-    Usage:
-        updater = Updater(current_version="1.1.0",
-                          manifest_url="https://example.com/myapp/latest.json")
-        updater.run()   # check, download, swap, relaunch (no-op when not frozen)
-
-    Manifest format (JSON):
-        {"version": "1.2.0", "url": "https://.../myapp.exe",
-         "sha256": "<hex>", "notes": "optional release notes"}
-    """
-
     def __init__(
         self,
         current_version: str,
@@ -76,13 +54,11 @@ class Updater:
         self.user_agent = user_agent
         self.exe_path = os.path.abspath(exe_path or sys.executable)
 
-    # ---------- network ----------
     def _open(self, url: str):
         req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
         return urllib.request.urlopen(req, timeout=self.timeout)
 
     def check(self) -> Optional[UpdateInfo]:
-        """Return UpdateInfo if a newer version is available, else None."""
         try:
             with self._open(self.manifest_url) as r:
                 data = json.load(r)
@@ -104,7 +80,6 @@ class Updater:
         info: UpdateInfo,
         progress: Optional[Callable[[int, Optional[int]], None]] = None,
     ) -> str:
-        """Download and verify the new exe. Returns the temp file path."""
         exe_dir = os.path.dirname(self.exe_path)
         fd, tmp = tempfile.mkstemp(dir=exe_dir, suffix=".download")
         os.close(fd)
@@ -127,52 +102,69 @@ class Updater:
         if h.hexdigest().lower() != info.sha256.lower():
             _silent_remove(tmp)
             raise UpdateError("Checksum mismatch - refusing to install update")
-        if os.name != "nt":
-            os.chmod(tmp, 0o755)
         return tmp
 
-    # ---------- install ----------
-    def install(self, downloaded_path: str) -> None:
-        """Swap the running exe for the downloaded one (rename trick)."""
-        old = self.exe_path + ".old"
-        try:
-            _silent_remove(old)
-            os.rename(self.exe_path, old)
-            try:
-                os.rename(downloaded_path, self.exe_path)
-            except OSError:
-                os.rename(old, self.exe_path)  # roll back
-                raise
-        except OSError as e:
-            _silent_remove(downloaded_path)
-            raise UpdateError(
-                f"Could not replace {self.exe_path} (no write permission?): {e}"
-            ) from e
+    def install_and_restart(self, downloaded_path: str) -> None:
+        """
+        Spawns a batch script on Windows to handle replacing the locked executable
+        after this process exits.
+        """
+        if os.name == "nt":
+            bat_path = os.path.join(tempfile.gettempdir(), "update_app.bat")
+            pid = os.getpid()
+            
+            # Create a batch script that waits for the process to die, replaces the exe, and restarts it
+            bat_content = f"""@echo off
+echo Waiting for process {pid} to exit...
+:waitloop
+tasklist /fi "pid eq {pid}" 2>NUL | find /i "{pid}" >NUL
+if not errorlevel 1 (
+    timeout /t 1 /nobreak >NUL
+    goto waitloop
+)
 
-    def restart(self) -> None:
-        """Launch the (new) exe as a fresh process and exit this one."""
-        env = os.environ.copy()
-        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
-        subprocess.Popen([self.exe_path, *sys.argv[1:]], env=env, close_fds=True)
-        sys.exit(0)
+echo Replacing executable...
+move /y "{downloaded_path}" "{self.exe_path}"
+if errorlevel 1 (
+    echo Update failed! Restoring or exiting...
+    exit /b 1
+)
+
+echo Launching updated application...
+start "" "{self.exe_path}"
+del "%~f0"
+"""
+            with open(bat_path, "w") as bfile:
+                bfile.write(bat_content)
+
+            # Launch the batch script detached
+            subprocess.Popen([bat_path], shell=True, creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW)
+            sys.exit(0)
+        else:
+            # Fallback/Unix logic
+            old = self.exe_path + ".old"
+            try:
+                _silent_remove(old)
+                os.rename(self.exe_path, old)
+                os.rename(downloaded_path, self.exe_path)
+                os.chmod(self.exe_path, 0o755)
+            except OSError as e:
+                _silent_remove(downloaded_path)
+                raise UpdateError(f"Could not replace executable: {e}") from e
+            
+            env = os.environ.copy()
+            subprocess.Popen([self.exe_path, *sys.argv[1:]], env=env, close_fds=True)
+            sys.exit(0)
 
     def cleanup(self) -> None:
-        """Remove the '.old' exe left behind by a previous update."""
         _silent_remove(self.exe_path + ".old")
 
-    # ---------- all-in-one ----------
     def run(
         self,
         ask: Optional[Callable[[UpdateInfo], bool]] = None,
         progress: Optional[Callable[[int, Optional[int]], None]] = None,
-        restart: bool = True,
         raise_errors: bool = False,
     ) -> bool:
-        """
-        Check -> (ask) -> download -> install -> restart.
-        Returns True if an update was installed (only reached when restart=False).
-        Does nothing when running from source rather than a frozen build.
-        """
         if not is_frozen():
             return False
         self.cleanup()
@@ -181,14 +173,12 @@ class Updater:
             if info is None or (ask and not ask(info)):
                 return False
             path = self.download(info, progress)
-            self.install(path)
+            self.install_and_restart(path)
         except UpdateError as e:
             if raise_errors:
                 raise
             print(f"[updater] {e}", file=sys.stderr)
             return False
-        if restart:
-            self.restart()
         return True
 
 
@@ -199,7 +189,6 @@ def _silent_remove(path: str) -> None:
         pass
 
 
-# ---------- release helper: python updater.py <exe> --version X --url Y ----------
 def make_manifest(exe: str, version: str, url: str, notes: str = "") -> dict:
     h = hashlib.sha256()
     with open(exe, "rb") as f:
@@ -210,7 +199,6 @@ def make_manifest(exe: str, version: str, url: str, notes: str = "") -> dict:
 
 if __name__ == "__main__":
     import argparse
-
     p = argparse.ArgumentParser(description="Generate an update manifest.")
     p.add_argument("exe", help="path to the built executable")
     p.add_argument("--version", required=True)
