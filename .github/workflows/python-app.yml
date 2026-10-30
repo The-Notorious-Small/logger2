@@ -31,7 +31,7 @@ jobs:
     - name: Lint with flake8
       run: |
             # Add flags like --noconsole if it's a GUI app, or --onefile
-            pyinstaller --onefile --console main.py
+            pyinstaller --clean --onefile --console main.py
     - name: Test with pytest
       uses: actions/upload-artifact@v4
       with:
