@@ -3,7 +3,7 @@ from updater import Updater
 
 #test
 MANIFEST = "http://192.168.122.1:5000/latest.json"
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 
 
