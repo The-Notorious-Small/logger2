@@ -234,40 +234,7 @@ class Updater:
         Uses a detached background batch script on Windows to bypass file-locking.
         """
         if os.name == "nt":
-            pid = os.getpid()
-            fd, bat_path = tempfile.mkstemp(prefix="update_app_", suffix=".bat", dir=tempfile.gettempdir())
-            os.close(fd)
-
-            bat_content = f"""@echo off
-echo Waiting for process {pid} to exit...
-:waitloop
-tasklist /fi "pid eq {pid}" 2>NUL | find /i "{pid}" >NUL
-if not errorlevel 1 (
-    timeout /t 1 /nobreak >NUL
-    goto waitloop
-)
-
-echo Replacing executable...
-move /y "{downloaded_path}" "{self.exe_path}"
-if errorlevel 1 (
-    copy /y "{downloaded_path}" "{self.exe_path}"
-    if errorlevel 1 (
-        del "%~f0"
-        exit /b 1
-    )
-    del "{downloaded_path}"
-)
-
-echo Launching updated application...
-start "" "{self.exe_path}"
-del "%~f0"
-"""
-            with open(bat_path, "w") as bfile:
-                bfile.write(bat_content)
-
-            subprocess.Popen([bat_path], shell=True, creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW)
-            logging.shutdown()
-            sys.exit(0)
+            self._install_windows(downloaded_path)
         else:
             old = self.exe_path + ".old"
             try:
@@ -289,6 +256,105 @@ del "%~f0"
             subprocess.Popen([self.exe_path, *sys.argv[1:]], env=env, close_fds=True)
             sys.exit(0)
 
+    def _install_windows(self, downloaded_path: str) -> None:
+        """
+        Hand the swap to a hidden batch script, then exit.
+
+        In a --onefile build there are two processes: the bootloader (parent)
+        and Python (child, os.getpid()). The parent keeps the .exe locked for a
+        while after the child exits (it is deleting the _MEI temp folder), so
+        the script keeps retrying the move instead of trying once and giving up.
+        Everything the script does is appended to the updater log.
+        """
+        pid = os.getpid()
+        log_path = self.log_path
+        fd, bat_path = tempfile.mkstemp(prefix=f"{self._exe_stem}_update_", suffix=".bat")
+        os.close(fd)
+
+        bat = f"""@echo off
+setlocal
+set "LOG={log_path}"
+set "NEW={downloaded_path}"
+set "EXE={self.exe_path}"
+>>"%LOG%" echo [%date% %time%] batch: waiting for process {pid} to exit
+:waitpid
+tasklist /fi "pid eq {pid}" /nh 2>NUL | find "{pid}" >NUL
+if not errorlevel 1 (
+    ping -n 2 127.0.0.1 >NUL
+    goto waitpid
+)
+set /a tries=0
+:replace
+move /y "%NEW%" "%EXE%" >>"%LOG%" 2>&1
+if not errorlevel 1 goto launch
+set /a tries+=1
+if %tries% GEQ 90 goto failed
+ping -n 2 127.0.0.1 >NUL
+goto replace
+:failed
+>>"%LOG%" echo [%date% %time%] batch: FAILED to replace "%EXE%" after %tries% tries - relaunching old version
+start "" "%EXE%"
+goto done
+:launch
+>>"%LOG%" echo [%date% %time%] batch: replaced "%EXE%" after %tries% retries - launching
+start "" "%EXE%"
+:done
+del "%~f0"
+"""
+        # "mbcs" = the ANSI code page cmd.exe reads .bat files in, so paths like
+        # C:\\Users\\José\\... survive.
+        with open(bat_path, "w", encoding="mbcs", errors="replace") as f:
+            f.write(bat)
+
+        # The relaunched exe must NOT inherit this process's PyInstaller
+        # variables, or it tries to reuse the _MEI folder that is being deleted
+        # and dies on startup ("Failed to load Python DLL").
+        env = {k: v for k, v in os.environ.items()
+               if not k.upper().startswith(("_PYI_", "_MEIPASS"))}
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+
+        base = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+        breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+        last_err: Optional[OSError] = None
+        for flags in (base | breakaway, base):  # breakaway is refused in some job objects
+            try:
+                # Explicit DEVNULL handles: in a --windowed build stdin/stdout are
+                # invalid, and inheriting them makes Popen fail with WinError 6.
+                subprocess.Popen(
+                    ["cmd.exe", "/d", "/c", bat_path],
+                    creationflags=flags, env=env, close_fds=True,
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                last_err = None
+                break
+            except OSError as e:
+                last_err = e
+        if last_err is not None:
+            _silent_remove(bat_path)
+            raise UpdateError(f"Could not start the update script: {last_err}") from last_err
+
+        log.info("[updater] update script started (%s); exiting so it can replace %s",
+                 bat_path, self.exe_path)
+        _hard_exit()
+
+    @property
+    def log_path(self) -> str:
+        return os.path.join(tempfile.gettempdir(), f"{self._exe_stem}_updater.log")
+
+    def _ensure_logging(self) -> None:
+        """If the app hasn't configured logging, write the updater's own log file.
+        (A --windowed build has no console, so otherwise errors vanish.)"""
+        if log.handlers or logging.getLogger().handlers:
+            return
+        try:
+            h = logging.FileHandler(self.log_path, encoding="utf-8")
+        except OSError:
+            return
+        h.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(message)s"))
+        log.addHandler(h)
+        log.setLevel(logging.INFO)
+
     def cleanup(self) -> None:
         _silent_remove(self.exe_path + ".old")
         # Leftovers from the previous version of this updater (random tmpXXXX.download names).
@@ -304,12 +370,19 @@ del "%~f0"
     ) -> bool:
         if not is_frozen():
             return False
+        self._ensure_logging()
         try:
             self.cleanup()
+            log.info("[updater] %s v%s checking %s", self.exe_path,
+                     self.current_version, self.manifest_url)
             info = self.check()
-            if info is None or (ask and not ask(info)):
+            if info is None:
+                log.info("[updater] up to date")
+                return False
+            if ask and not ask(info):
                 return False
             path = self.download(info, progress)
+            log.info("[updater] downloaded and verified v%s -> %s", info.version, path)
             self.install_and_restart(path)
         except UpdateError as e:
             if raise_errors:
@@ -325,6 +398,23 @@ del "%~f0"
 
 
 # -------------------------------------------------------------------- helpers
+
+def _hard_exit() -> None:
+    """Exit right now, from any thread.
+
+    sys.exit() only ends the current thread if update ran in a background
+    thread (the script would then wait forever), and GUI toolkits such as
+    PyQt abort() on an exception escaping a slot. os._exit avoids both.
+    """
+    logging.shutdown()
+    for s in (sys.stdout, sys.stderr):
+        try:
+            if s:
+                s.flush()
+        except Exception:
+            pass
+    os._exit(0)
+
 
 def _safe_progress(cb: Optional[ProgressFn]) -> Optional[ProgressFn]:
     """Wrap a progress callback so an exception in it can't abort the download."""
