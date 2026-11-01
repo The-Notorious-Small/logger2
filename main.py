@@ -5,7 +5,7 @@ from agent import Agent
 
 #test
 MANIFEST = "http://192.168.122.1:5000/latest.json"
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 
 
