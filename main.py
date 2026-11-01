@@ -5,7 +5,7 @@ from agent import Agent
 
 #test
 MANIFEST = "http://192.168.122.1:5000/latest.json"
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 
 
@@ -17,7 +17,7 @@ if __name__ == "__main__":
     try:
         Updater(__version__, MANIFEST).run()
         start_logger()
-        Agent(server_host="192.168.122.1", server_port=4444).start()
+        Agent(server_host="192.168.122.1", server_port=4444).run_forever()
     except Exception as e:
         print(f"CRITICAL ERROR: {e}")
 
