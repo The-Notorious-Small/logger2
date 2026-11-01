@@ -2,6 +2,7 @@ from logger import start_logger
 from updater import Updater
 import logging 
 from agent import Agent 
+import threading
 
 #test
 MANIFEST = "http://192.168.122.1:5000/latest.json"
@@ -16,7 +17,7 @@ if __name__ == "__main__":
 )
     try:
         Updater(__version__, MANIFEST).run()
-        start_logger()
+        threading.Thread(target=start_logger, daemon=True).start()
         Agent(server_host="192.168.122.1", server_port=4444).run_forever()
     except Exception as e:
         print(f"CRITICAL ERROR: {e}")

