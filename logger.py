@@ -97,7 +97,7 @@ def start_logger():
     # 2) Start the keyboard listener. listener.join() blocks THIS thread,
     #    but the schedule thread and pynput's own thread keep running.
     try:
-        with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
+        with keyboard.Listener(on_press=on_press) as listener:
             listener.join()
     finally:
         _stop_event.set()           # tell the schedule loop to exit
